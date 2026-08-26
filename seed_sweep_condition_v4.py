@@ -17,7 +17,14 @@ from seed_sweep_fast import build_parser, config_from_args
 from seed_sweep_percent_stop import _init_worker, _simulate_seed, _summarize
 
 
-def _cache_path(config: Config, ma_long: int, ma_mid: int, ma_short: int) -> Path:
+def _cache_path(
+    config: Config,
+    ma_long: int,
+    ma_mid: int,
+    ma_short: int,
+    envelope_period: int | None = None,
+    envelope_percent: float | None = None,
+) -> Path:
     key = {
         "start": config.start,
         "end": config.end,
@@ -33,8 +40,10 @@ def _cache_path(config: Config, ma_long: int, ma_mid: int, ma_short: int) -> Pat
         "ma_long": ma_long,
         "ma_mid": ma_mid,
         "ma_short": ma_short,
+        "envelope_period": envelope_period,
+        "envelope_percent": envelope_percent,
         "condition": "ma_long<ma_mid<ma_short",
-        "format_version": 1,
+        "format_version": 2,
     }
     digest = hashlib.sha256(
         json.dumps(key, sort_keys=True, default=list).encode("utf-8")
@@ -50,8 +59,20 @@ def prepare_condition(
     ma_mid: int,
     ma_short: int,
     rebuild: bool = False,
+    envelope_period: int | None = None,
+    envelope_percent: float | None = None,
 ) -> tuple[dict[str, Any], Path, bool]:
-    cache_path = _cache_path(config, ma_long, ma_mid, ma_short)
+    if (envelope_period is None) != (envelope_percent is None):
+        raise ValueError("envelope-period and envelope-percent must be supplied together")
+
+    cache_path = _cache_path(
+        config,
+        ma_long,
+        ma_mid,
+        ma_short,
+        envelope_period,
+        envelope_percent,
+    )
     if cache_path.exists() and not rebuild:
         with cache_path.open("rb") as fh:
             return pickle.load(fh), cache_path, True
@@ -61,7 +82,8 @@ def prepare_condition(
 
     start = pd.Timestamp(config.start).normalize()
     end = pd.Timestamp(config.end).normalize()
-    warmup_start = start - pd.DateOffset(days=max(800, ma_long * 3))
+    warmup_period = max(ma_long, envelope_period or 0)
+    warmup_start = start - pd.DateOffset(days=max(800, warmup_period * 3))
     future_end = end + pd.DateOffset(days=max(30, config.max_hold_days * 3))
 
     frame = stock._slice_years(  # type: ignore[attr-defined]
@@ -88,7 +110,10 @@ def prepare_condition(
     frame = frame.sort_values(["ticker", "Date"]).reset_index(drop=True)
 
     grouped_close = frame.groupby("ticker", sort=False)["close"]
-    for days in sorted({ma_long, ma_mid, ma_short}):
+    ma_periods = {ma_long, ma_mid, ma_short}
+    if envelope_period is not None:
+        ma_periods.add(envelope_period)
+    for days in sorted(ma_periods):
         frame[f"ma_{days}"] = grouped_close.transform(
             lambda s, n=days: s.rolling(n, min_periods=n).mean()
         )
@@ -118,6 +143,11 @@ def prepare_condition(
         & (signal_frame[f"ma_{ma_long}"] < signal_frame[f"ma_{ma_mid}"])
         & (signal_frame[f"ma_{ma_mid}"] < signal_frame[f"ma_{ma_short}"])
     )
+    if envelope_period is not None and envelope_percent is not None:
+        lower_envelope = signal_frame[f"ma_{envelope_period}"] * (
+            1.0 - envelope_percent / 100.0
+        )
+        eligible &= signal_frame["close"] <= lower_envelope
     if config.market_cap_max is not None:
         eligible &= signal_frame["market_cap"] <= config.market_cap_max
     signal_frame = signal_frame[eligible]
