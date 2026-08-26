@@ -167,7 +167,7 @@ def main() -> None:
     parser.add_argument(
         "--envelope-percent",
         type=float,
-        default=20.0,
+        default=6.0,
         help="Envelope width in percent; lower band = SMA * (1 - percent / 100).",
     )
     parser.set_defaults(
