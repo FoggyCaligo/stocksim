@@ -1,12 +1,22 @@
-# Updated MTS condition sweep
+# Condition sweep runner
 
-`seed_sweep_condition_v2.py` matches the updated MTS screenshot:
+`seed_sweep_condition_v4_kiwoom.py` reproduces the historical parts of the Kiwoom condition filter and can additionally require the close to be at or below the Envelope lower band.
 
-- Close: 0 to 100,000 KRW
-- Market cap: at least 300 billion KRW
-- Daily return: -7% to -1%
-- Trading value: 300 to 100,000 in the existing mapped units
-- MA120 < MA60
-- MA60 > MA3 < MA10
+For a Kiwoom-style 1-month hold comparison with no early exits, use `--no-take-profit --no-stop-loss --max-hold-days 20`.
 
-The runner keeps the percentage stop-loss behavior from `seed_sweep_percent_stop.py` and reuses multiprocessing/prepared-cache mechanics. Moving-average periods and the percentage stop are CLI-configurable.
+Example:
+
+```bash
+python seed_sweep_condition_v4_kiwoom.py \
+  --start 2022-01-01 \
+  --end 2026-07-31 \
+  --seed-start 1 \
+  --seed-end 100 \
+  --workers 4 \
+  --daily-buy-count 5 \
+  --max-hold-days 20 \
+  --no-take-profit \
+  --no-stop-loss
+```
+
+Envelope defaults to 20 periods and 6%. Override with `--envelope-period` and `--envelope-percent`.
