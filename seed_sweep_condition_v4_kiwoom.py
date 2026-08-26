@@ -284,6 +284,7 @@ def main() -> None:
         },
     }
     aggregate["take_profit_enabled"] = take_profit_enabled
+    aggregate["take_profit"] = config.take_profit if take_profit_enabled else None
     aggregate["stop_loss_enabled"] = stop_loss_enabled
     aggregate["stop_loss_pct"] = args.stop_loss_pct if stop_loss_enabled else None
     aggregate["cost_model"] = {
