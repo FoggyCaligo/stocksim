@@ -199,7 +199,7 @@ def main() -> None:
         raise ValueError("seed-end must be >= seed-start")
     if args.workers < 1:
         raise ValueError("workers must be >= 1")
-    if not 0 < args.stop_loss_pct < 1:
+    if not args.no_stop_loss and not 0 < args.stop_loss_pct < 1:
         raise ValueError("stop-loss-pct must be between 0 and 1")
     if not (args.ma_long > args.ma_mid > args.ma_short >= 1):
         raise ValueError("MA periods must satisfy ma-long > ma-mid > ma-short >= 1")
