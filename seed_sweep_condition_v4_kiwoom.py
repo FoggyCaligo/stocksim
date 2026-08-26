@@ -215,6 +215,7 @@ def main() -> None:
 
     take_profit_enabled = not args.no_take_profit
     stop_loss_enabled = not args.no_stop_loss
+    effective_stop_loss_pct = args.stop_loss_pct if stop_loss_enabled else 0.0
 
     print("[1/2] preparing MA-order + Envelope lower-band candidates once...")
     prepared, prepared_path, reused = prepare_condition(
@@ -248,7 +249,7 @@ def main() -> None:
     worker_args = (
         str(prepared_path),
         config_dict,
-        args.stop_loss_pct,
+        effective_stop_loss_pct,
         take_profit_enabled,
         stop_loss_enabled,
     )
