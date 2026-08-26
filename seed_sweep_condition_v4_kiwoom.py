@@ -19,16 +19,26 @@ from seed_sweep_kiwoom import kiwoom_sell_tax_rate
 _PREPARED: dict[str, Any] | None = None
 _CONFIG: Config | None = None
 _STOP_LOSS_PCT = 0.03
+_TAKE_PROFIT_ENABLED = True
+_STOP_LOSS_ENABLED = True
 
 
-def _init_worker(prepared_path: str, config_dict: dict[str, Any], stop_loss_pct: float) -> None:
-    global _PREPARED, _CONFIG, _STOP_LOSS_PCT
+def _init_worker(
+    prepared_path: str,
+    config_dict: dict[str, Any],
+    stop_loss_pct: float,
+    take_profit_enabled: bool,
+    stop_loss_enabled: bool,
+) -> None:
+    global _PREPARED, _CONFIG, _STOP_LOSS_PCT, _TAKE_PROFIT_ENABLED, _STOP_LOSS_ENABLED
     with Path(prepared_path).open("rb") as fh:
         _PREPARED = pickle.load(fh)
     config_dict = dict(config_dict)
     config_dict["markets"] = tuple(config_dict["markets"])
     _CONFIG = Config(**config_dict)
     _STOP_LOSS_PCT = stop_loss_pct
+    _TAKE_PROFIT_ENABLED = take_profit_enabled
+    _STOP_LOSS_ENABLED = stop_loss_enabled
 
 
 def _simulate_seed(seed: int) -> dict[str, Any]:
@@ -91,9 +101,13 @@ def _simulate_seed(seed: int) -> dict[str, Any]:
             exit_price: float | None = None
 
             # Same daily-bar convention as the existing sweep: target hit has priority.
-            if p.holding_days <= config.max_hold_days and current_high >= target:
+            if (
+                _TAKE_PROFIT_ENABLED
+                and p.holding_days <= config.max_hold_days
+                and current_high >= target
+            ):
                 reason, exit_price = "take_profit", target
-            elif current_close <= stop_price:
+            elif _STOP_LOSS_ENABLED and current_close <= stop_price:
                 reason, exit_price = "percent_stop", current_close
             elif p.holding_days >= config.max_hold_days:
                 reason, exit_price = "max_hold_exit", current_close
@@ -157,9 +171,11 @@ def main() -> None:
     parser = build_parser()
     parser.description = (
         "MA240 < MA120 < MA60 plus Envelope lower-band sweep with Kiwoom fees, "
-        "historical sell tax, and percent stop."
+        "historical sell tax, and optional take-profit/percent-stop exits."
     )
     parser.add_argument("--stop-loss-pct", type=float, default=0.03)
+    parser.add_argument("--no-take-profit", action="store_true")
+    parser.add_argument("--no-stop-loss", action="store_true")
     parser.add_argument("--ma-long", type=int, default=240)
     parser.add_argument("--ma-mid", type=int, default=120)
     parser.add_argument("--ma-short", type=int, default=60)
@@ -197,6 +213,9 @@ def main() -> None:
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    take_profit_enabled = not args.no_take_profit
+    stop_loss_enabled = not args.no_stop_loss
+
     print("[1/2] preparing MA-order + Envelope lower-band candidates once...")
     prepared, prepared_path, reused = prepare_condition(
         config,
@@ -212,7 +231,12 @@ def main() -> None:
         f"condition: MA{args.ma_long} < MA{args.ma_mid} < MA{args.ma_short} / "
         f"close <= Envelope({args.envelope_period}, {args.envelope_percent:g}%) lower band"
     )
-    print(f"strategy: TP +{config.take_profit * 100:.2f}% / stop -{args.stop_loss_pct * 100:.2f}% close / max hold {config.max_hold_days} days")
+    tp_text = f"+{config.take_profit * 100:.2f}%" if take_profit_enabled else "OFF"
+    stop_text = f"-{args.stop_loss_pct * 100:.2f}% close" if stop_loss_enabled else "OFF"
+    print(
+        f"strategy: TP {tp_text} / stop {stop_text} / "
+        f"max hold {config.max_hold_days} days"
+    )
     print("Kiwoom KRX commission: 0.015% each side")
     print("Sell tax: 2022 0.23%, 2023 0.20%, 2024 0.18%, 2025 0.15%, 2026 0.20%")
 
@@ -221,9 +245,16 @@ def main() -> None:
     print(f"[2/2] running {len(seeds)} seeds with {workers} process(es)...")
     config_dict = asdict(config)
     rows: list[dict[str, Any]] = []
+    worker_args = (
+        str(prepared_path),
+        config_dict,
+        args.stop_loss_pct,
+        take_profit_enabled,
+        stop_loss_enabled,
+    )
 
     if workers == 1:
-        _init_worker(str(prepared_path), config_dict, args.stop_loss_pct)
+        _init_worker(*worker_args)
         for n, seed in enumerate(seeds, 1):
             rows.append(_simulate_seed(seed))
             print(f"[{n}/{len(seeds)}] seed {seed} complete")
@@ -231,7 +262,7 @@ def main() -> None:
         with ProcessPoolExecutor(
             max_workers=workers,
             initializer=_init_worker,
-            initargs=(str(prepared_path), config_dict, args.stop_loss_pct),
+            initargs=worker_args,
         ) as pool:
             for n, row in enumerate(pool.map(_simulate_seed, seeds), 1):
                 rows.append(row)
@@ -251,7 +282,9 @@ def main() -> None:
             "relation": "close<=lower_band",
         },
     }
-    aggregate["stop_loss_pct"] = args.stop_loss_pct
+    aggregate["take_profit_enabled"] = take_profit_enabled
+    aggregate["stop_loss_enabled"] = stop_loss_enabled
+    aggregate["stop_loss_pct"] = args.stop_loss_pct if stop_loss_enabled else None
     aggregate["cost_model"] = {
         "broker": "Kiwoom Securities",
         "commission_rate_each_side": config.commission_rate,
