@@ -105,10 +105,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--envelope-percent", type=float, default=None)
     p.add_argument(
         "--envelope-filter",
-        choices=("below", "recent-low-cross", "recent-close-cross"),
+        choices=("below", "below-lower-range", "recent-low-cross", "recent-close-cross"),
         default=None,
     )
     p.add_argument("--envelope-cross-lookback-days", type=int, default=3)
+    p.add_argument(
+        "--envelope-below-percent",
+        type=float,
+        default=None,
+        help=(
+            "With --envelope-filter below-lower-range, require signal-day low to be "
+            "between the lower Envelope band and this percent below the lower band."
+        ),
+    )
 
     p.add_argument(
         "--target-mode",
@@ -198,6 +207,13 @@ def validate_args(a: argparse.Namespace) -> None:
         raise ValueError("envelope-filter requires Envelope settings")
     if a.envelope_cross_lookback_days < 1:
         raise ValueError("envelope-cross-lookback-days must be >= 1")
+    if a.envelope_filter == "below-lower-range":
+        if a.envelope_below_percent is None or not 0 < a.envelope_below_percent < 100:
+            raise ValueError(
+                "below-lower-range requires --envelope-below-percent between 0 and 100"
+            )
+    elif a.envelope_below_percent is not None and not 0 < a.envelope_below_percent < 100:
+        raise ValueError("envelope-below-percent must be between 0 and 100")
     if a.target_mode.startswith("envelope") and a.envelope_period is None:
         raise ValueError("Envelope target mode requires Envelope settings")
     if a.target_mode == "fixed-return" and (
@@ -254,8 +270,9 @@ def config_dict(a: argparse.Namespace) -> dict[str, Any]:
         "price_min", "price_max", "market_cap_min", "market_cap_max",
         "daily_return_min", "daily_return_max", "trading_value_min", "trading_value_max",
         "ma_long", "ma_mid", "ma_short", "envelope_period", "envelope_percent",
-        "envelope_filter", "envelope_cross_lookback_days", "target_mode", "target_basis",
-        "fixed_take_profit", "planned_target_return_min", "planned_target_return_max",
+        "envelope_filter", "envelope_cross_lookback_days", "envelope_below_percent",
+        "target_mode", "target_basis", "fixed_take_profit",
+        "planned_target_return_min", "planned_target_return_max",
         "hold_mode", "hold_period_ratio", "fixed_hold_days", "touch_lookback_days",
         "max_hold_days", "stop_mode", "stop_gap_ratio", "fixed_stop_loss_pct",
         "allocation_mode", "position_size", "daily_buy_count",
@@ -424,6 +441,10 @@ def prepare(a: argparse.Namespace) -> tuple[dict[str, Any], Path, bool]:
 
     if a.envelope_filter == "below":
         eligible &= signal_frame["close"] <= signal_frame["env_lower"]
+    elif a.envelope_filter == "below-lower-range":
+        lower_floor = signal_frame["env_lower"] * (1 - a.envelope_below_percent / 100.0)
+        eligible &= signal_frame["low"] <= signal_frame["env_lower"]
+        eligible &= signal_frame["low"] >= lower_floor
     elif a.envelope_filter == "recent-low-cross":
         eligible &= signal_frame["recent_low_cross"]
     elif a.envelope_filter == "recent-close-cross":
