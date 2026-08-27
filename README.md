@@ -6,6 +6,8 @@ Backtesting utilities for configurable swing-trading strategies on Korean equiti
 
 실험용 seed sweep는 `seed_sweep.py` 하나만 사용한다.
 
+전체 명령어와 동작 설명은 [`SEED_SWEEP_MANUAL.md`](SEED_SWEEP_MANUAL.md)를 참고한다. 터미널에서는 `python seed_sweep.py -h`로 현재 사용 가능한 옵션을 바로 확인할 수 있다.
+
 - 기본값은 1~100 seed.
 - 가격/시총/등락률/거래대금/이평/Envelope 조건은 명령어에 넣은 것만 적용된다.
 - Envelope 조건은 `below`, `below-lower-range`, `recent-low-cross`, `recent-close-cross` 중 선택할 수 있다.
