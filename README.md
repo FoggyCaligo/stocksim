@@ -8,7 +8,8 @@ Backtesting utilities for configurable swing-trading strategies on Korean equiti
 
 - 기본값은 1~100 seed.
 - 가격/시총/등락률/거래대금/이평/Envelope 조건은 명령어에 넣은 것만 적용된다.
-- Envelope 조건은 `below`, `recent-low-cross`, `recent-close-cross` 중 선택할 수 있다.
+- Envelope 조건은 `below`, `below-lower-range`, `recent-low-cross`, `recent-close-cross` 중 선택할 수 있다.
+- `below-lower-range`는 당일 저가가 Envelope 하단선 아래이되 `--envelope-below-percent`로 지정한 범위 안에 있는 종목만 통과시킨다. 예: 6이면 `하단선×0.94 <= 저가 <= 하단선`.
 - 목표가는 Envelope 중앙선, 중앙~상단 중간, 고정 수익률 중 선택할 수 있다.
 - Envelope 목표는 신호일 값(`signal-day`) 또는 매수일 시가 시점 값(`entry-day-open`)을 선택할 수 있다.
 - `entry-day-open`은 미래 종가를 보지 않도록 직전 N-1개 종가와 매수일 시가로 Envelope SMA를 계산한다.
@@ -23,7 +24,7 @@ Backtesting utilities for configurable swing-trading strategies on Korean equiti
 
 ### 현재 실험 예시
 
-최근 3영업일 내 **저가 기준 Envelope 하단 하향돌파**, **매수일 시가 시점 Envelope 중앙선**을 목표가로 사용, 목표수익률 8~16%, 과거 목표가 터치기간의 2배를 보유하되 최대 20영업일, 보유현금 균등분배, 고정 -3%/-4% 손절 비교:
+**당일 저가가 Envelope 하단선 아래 6% 이내**, **매수일 시가 시점 Envelope 중앙선**을 목표가로 사용, 목표수익률 8~16%, 과거 목표가 터치기간의 2배를 보유하되 최대 20영업일, 보유현금 균등분배, 고정 -3%/-4% 손절 비교:
 
 ```bash
 python seed_sweep.py \
@@ -43,8 +44,8 @@ python seed_sweep.py \
   --ma-short 60 \
   --envelope-period 20 \
   --envelope-percent 6 \
-  --envelope-filter recent-low-cross \
-  --envelope-cross-lookback-days 3 \
+  --envelope-filter below-lower-range \
+  --envelope-below-percent 6 \
   --target-mode envelope-center \
   --target-basis entry-day-open \
   --planned-target-return-min 8 \
