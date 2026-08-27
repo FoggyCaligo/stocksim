@@ -51,8 +51,8 @@ def kiwoom_sell_tax_rate(day: str | pd.Timestamp) -> float:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
-            "All-in-one stocksim 100-seed runner. Conditions are opt-in: "
-            "if a setting is omitted, that condition is not applied."
+            "All-in-one stocksim 100-seed runner. Conditions are opt-in and "
+            "strategy experiments are configured through CLI arguments."
         )
     )
     p.add_argument("--start", required=True)
@@ -60,9 +60,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed-start", type=int, default=1)
     p.add_argument("--seed-end", type=int, default=100)
     p.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
-    p.add_argument("--daily-buy-count", type=int, default=5)
+    p.add_argument(
+        "--daily-buy-count",
+        type=int,
+        default=5,
+        help=(
+            "Maximum concurrent position slots in equal-cash mode; also the maximum "
+            "number of signal candidates queued per day. Default: 5."
+        ),
+    )
     p.add_argument("--initial-capital", type=int, default=1_000_000)
-    p.add_argument("--position-size", type=int, default=100_000)
+    p.add_argument(
+        "--allocation-mode",
+        choices=("equal-cash", "fixed-position"),
+        default="equal-cash",
+        help=(
+            "equal-cash: divide available cash by currently empty portfolio slots. "
+            "fixed-position: cap each purchase with --position-size. Default: equal-cash."
+        ),
+    )
+    p.add_argument(
+        "--position-size",
+        type=int,
+        default=None,
+        help="Per-position KRW cap used only with --allocation-mode fixed-position.",
+    )
     p.add_argument("--no-reentry", action="store_true")
     p.add_argument("--markets", default="KOSPI,KOSDAQ")
 
@@ -92,6 +114,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--target-mode",
         choices=("envelope-center", "envelope-mid-upper", "fixed-return", "none"),
         default="none",
+    )
+    p.add_argument(
+        "--target-basis",
+        choices=("signal-day", "entry-day-open"),
+        default="signal-day",
+        help=(
+            "For Envelope targets, choose the signal-day Envelope value or the value "
+            "available at the next-day entry open. entry-day-open replaces the current "
+            "daily close in the Envelope SMA with the entry-day open, avoiding look-ahead."
+        ),
     )
     p.add_argument("--fixed-take-profit", type=float, default=None)
     p.add_argument("--planned-target-return-min", type=float, default=None)
@@ -141,8 +173,13 @@ def validate_args(a: argparse.Namespace) -> None:
         raise ValueError("seed-end must be >= seed-start")
     if a.workers < 1 or a.daily_buy_count < 1:
         raise ValueError("workers and daily-buy-count must be >= 1")
-    if a.initial_capital <= 0 or a.position_size <= 0:
-        raise ValueError("capital values must be > 0")
+    if a.initial_capital <= 0:
+        raise ValueError("initial-capital must be > 0")
+    if a.allocation_mode == "fixed-position":
+        if a.position_size is None or a.position_size <= 0:
+            raise ValueError("fixed-position allocation requires --position-size > 0")
+    elif a.position_size is not None and a.position_size <= 0:
+        raise ValueError("position-size must be > 0 when supplied")
 
     ma = (a.ma_long, a.ma_mid, a.ma_short)
     if any(x is not None for x in ma):
@@ -159,12 +196,20 @@ def validate_args(a: argparse.Namespace) -> None:
             raise ValueError("invalid Envelope settings")
     if a.envelope_filter is not None and a.envelope_period is None:
         raise ValueError("envelope-filter requires Envelope settings")
+    if a.envelope_cross_lookback_days < 1:
+        raise ValueError("envelope-cross-lookback-days must be >= 1")
     if a.target_mode.startswith("envelope") and a.envelope_period is None:
         raise ValueError("Envelope target mode requires Envelope settings")
-    if a.target_mode == "fixed-return" and (a.fixed_take_profit is None or a.fixed_take_profit <= 0):
+    if a.target_mode == "fixed-return" and (
+        a.fixed_take_profit is None or a.fixed_take_profit <= 0
+    ):
         raise ValueError("fixed-return target requires --fixed-take-profit > 0")
+    if a.target_basis == "entry-day-open" and not a.target_mode.startswith("envelope"):
+        raise ValueError("entry-day-open target basis is only valid for Envelope targets")
 
-    if a.hold_mode == "fixed" and (a.fixed_hold_days is None or a.fixed_hold_days < 1):
+    if a.hold_mode == "fixed" and (
+        a.fixed_hold_days is None or a.fixed_hold_days < 1
+    ):
         raise ValueError("fixed hold requires --fixed-hold-days >= 1")
     if a.hold_mode == "recent-target-touch" and a.target_mode == "none":
         raise ValueError("recent-target-touch hold requires a target")
@@ -175,14 +220,22 @@ def validate_args(a: argparse.Namespace) -> None:
     if a.touch_lookback_days is not None and a.touch_lookback_days < 1:
         raise ValueError("touch-lookback-days must be >= 1")
 
-    if a.stop_mode == "target-gap" and (a.stop_gap_ratio is None or a.stop_gap_ratio <= 0):
+    if a.stop_mode == "target-gap" and (
+        a.stop_gap_ratio is None or a.stop_gap_ratio <= 0
+    ):
         raise ValueError("target-gap stop requires --stop-gap-ratio > 0")
-    if a.stop_mode == "fixed-pct" and (a.fixed_stop_loss_pct is None or not 0 < a.fixed_stop_loss_pct < 1):
-        raise ValueError("fixed-pct stop requires --fixed-stop-loss-pct between 0 and 1")
+    if a.stop_mode == "fixed-pct" and (
+        a.fixed_stop_loss_pct is None or not 0 < a.fixed_stop_loss_pct < 1
+    ):
+        raise ValueError(
+            "fixed-pct stop requires --fixed-stop-loss-pct between 0 and 1"
+        )
     if a.compare_fixed_stops:
         for value in parse_compare_stops(a.compare_fixed_stops):
             if not 0 < value < 1:
-                raise ValueError("compare-fixed-stops values must be decimals between 0 and 1")
+                raise ValueError(
+                    "compare-fixed-stops values must be decimals between 0 and 1"
+                )
 
     if a.planned_target_return_min is not None and a.planned_target_return_min < 0:
         raise ValueError("planned-target-return-min must be >= 0")
@@ -201,20 +254,29 @@ def config_dict(a: argparse.Namespace) -> dict[str, Any]:
         "price_min", "price_max", "market_cap_min", "market_cap_max",
         "daily_return_min", "daily_return_max", "trading_value_min", "trading_value_max",
         "ma_long", "ma_mid", "ma_short", "envelope_period", "envelope_percent",
-        "envelope_filter", "envelope_cross_lookback_days", "target_mode",
+        "envelope_filter", "envelope_cross_lookback_days", "target_mode", "target_basis",
         "fixed_take_profit", "planned_target_return_min", "planned_target_return_max",
         "hold_mode", "hold_period_ratio", "fixed_hold_days", "touch_lookback_days",
         "max_hold_days", "stop_mode", "stop_gap_ratio", "fixed_stop_loss_pct",
+        "allocation_mode", "position_size", "daily_buy_count",
     ]
     return {key: getattr(a, key) for key in keys}
 
 
 def _cache_path(a: argparse.Namespace) -> Path:
     cfg = config_dict(a)
-    cfg["stop_mode"] = None
-    cfg["stop_gap_ratio"] = None
-    cfg["fixed_stop_loss_pct"] = None
-    key = {"start": a.start, "end": a.end, "markets": a.markets, **cfg, "format_version": 3}
+    for key in (
+        "stop_mode", "stop_gap_ratio", "fixed_stop_loss_pct",
+        "allocation_mode", "position_size", "daily_buy_count",
+    ):
+        cfg[key] = None
+    key = {
+        "start": a.start,
+        "end": a.end,
+        "markets": a.markets,
+        **cfg,
+        "format_version": 4,
+    }
     digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
     root = Path(a.cache_dir) / "prepared_allinone"
     root.mkdir(parents=True, exist_ok=True)
@@ -227,6 +289,17 @@ def _apply_range(mask: pd.Series, series: pd.Series, lo: float | None, hi: float
     if hi is not None:
         mask &= series <= hi
     return mask
+
+
+def _entry_open_envelope_center(frame: pd.DataFrame, period: int) -> pd.Series:
+    """Envelope SMA value available at the session open without future close data."""
+    if period == 1:
+        return frame["open"].astype(float)
+    grouped_close = frame.groupby("ticker", sort=False)["close"]
+    prior_sum = grouped_close.transform(
+        lambda s, n=period: s.shift(1).rolling(n - 1, min_periods=n - 1).sum()
+    )
+    return (prior_sum + frame["open"]) / float(period)
 
 
 def prepare(a: argparse.Namespace) -> tuple[dict[str, Any], Path, bool]:
@@ -286,6 +359,11 @@ def prepare(a: argparse.Namespace) -> tuple[dict[str, Any], Path, bool]:
         frame["env_center"] = frame[f"ma_{a.envelope_period}"]
         frame["env_upper"] = frame["env_center"] * (1 + a.envelope_percent / 100.0)
         frame["env_lower"] = frame["env_center"] * (1 - a.envelope_percent / 100.0)
+        frame["env_center_at_open"] = _entry_open_envelope_center(frame, a.envelope_period)
+        frame["env_mid_upper_at_open"] = frame["env_center_at_open"] * (
+            1 + a.envelope_percent / 200.0
+        )
+
         grouped = frame.groupby("ticker", sort=False)
         prev_low = grouped["low"].shift(1)
         prev_close = grouped["close"].shift(1)
@@ -317,6 +395,21 @@ def prepare(a: argparse.Namespace) -> tuple[dict[str, Any], Path, bool]:
             for row in day[["ticker", "open", "high", "low", "close"]].itertuples(index=False)
             if float(row.close) > 0
         }
+
+    entry_targets: dict[str, dict[str, float]] = {}
+    if a.envelope_period is not None:
+        target_col = (
+            "env_center_at_open"
+            if a.target_mode == "envelope-center"
+            else "env_mid_upper_at_open"
+        )
+        for d, day in frame.groupby("Date", sort=True):
+            key = pd.Timestamp(d).strftime("%Y-%m-%d")
+            entry_targets[key] = {
+                row.ticker: float(getattr(row, target_col))
+                for row in day[["ticker", target_col]].itertuples(index=False)
+                if pd.notna(getattr(row, target_col))
+            }
 
     signal_frame = frame[frame["Date"].isin(signal_dates)].copy()
     eligible = pd.Series(True, index=signal_frame.index)
@@ -353,20 +446,41 @@ def prepare(a: argparse.Namespace) -> tuple[dict[str, Any], Path, bool]:
     candidates: dict[str, list[str]] = {}
     strategy: dict[str, dict[str, dict[str, Any]]] = {}
     skipped_no_touch = 0
+    skipped_no_entry_target = 0
 
     for signal_date, ticker, signal_target in signal_frame[
         ["Date", "ticker", "signal_target"]
     ].itertuples(index=False, name=None):
         signal_date = pd.Timestamp(signal_date)
         ticker = str(ticker)
-        target = None if pd.isna(signal_target) else float(signal_target)
+
+        if date_index[signal_date] + 1 >= len(dates):
+            continue
+        entry_date = dates[date_index[signal_date] + 1]
+        entry_day_key = entry_date.strftime("%Y-%m-%d")
+
+        if a.target_mode.startswith("envelope") and a.target_basis == "entry-day-open":
+            target = entry_targets.get(entry_day_key, {}).get(ticker)
+            if target is None or not math.isfinite(target):
+                skipped_no_entry_target += 1
+                continue
+        else:
+            target = None if pd.isna(signal_target) else float(signal_target)
+
         recent_touch_date = None
         raw_hold_days = None
         hold_days = None
 
         if a.hold_mode == "recent-target-touch":
+            if target is None:
+                raise RuntimeError("recent-target-touch hold requires a target")
             hist = by_ticker[ticker]
-            before = hist[hist["Date"] < signal_date]
+            reference_date = (
+                entry_date
+                if a.target_basis == "entry-day-open" and a.target_mode.startswith("envelope")
+                else signal_date
+            )
+            before = hist[hist["Date"] < reference_date]
             if a.touch_lookback_days is not None:
                 before = before.tail(a.touch_lookback_days)
             touched = before[(before["low"] <= target) & (before["high"] >= target)]
@@ -375,7 +489,7 @@ def prepare(a: argparse.Namespace) -> tuple[dict[str, Any], Path, bool]:
                 continue
             touch_date = pd.Timestamp(touched.iloc[-1]["Date"])
             recent_touch_date = touch_date.strftime("%Y-%m-%d")
-            raw_hold_days = date_index[signal_date] - date_index[touch_date]
+            raw_hold_days = date_index[reference_date] - date_index[touch_date]
             if raw_hold_days < 1:
                 skipped_no_touch += 1
                 continue
@@ -389,7 +503,8 @@ def prepare(a: argparse.Namespace) -> tuple[dict[str, Any], Path, bool]:
         day_key = signal_date.strftime("%Y-%m-%d")
         candidates.setdefault(day_key, []).append(ticker)
         strategy.setdefault(day_key, {})[ticker] = {
-            "signal_target": target,
+            "target_price": target,
+            "target_basis": a.target_basis,
             "recent_touch_date": recent_touch_date,
             "raw_hold_days": raw_hold_days,
             "max_hold_days": hold_days,
@@ -406,6 +521,7 @@ def prepare(a: argparse.Namespace) -> tuple[dict[str, Any], Path, bool]:
         "candidates": candidates,
         "strategy": strategy,
         "skipped_no_touch": skipped_no_touch,
+        "skipped_no_entry_target": skipped_no_entry_target,
     }
     with cache_path.open("wb") as fh:
         pickle.dump(prepared, fh, protocol=pickle.HIGHEST_PROTOCOL)
@@ -421,6 +537,14 @@ def _init_worker(prepared_path: str, args_dict: dict[str, Any]) -> None:
 
 def _pct(num: float, den: float) -> float | None:
     return None if den == 0 else num / den * 100.0
+
+
+def _purchase_budget(a: dict[str, Any], cash: float, free_slots: int) -> float:
+    if free_slots < 1 or cash <= 0:
+        return 0.0
+    if a["allocation_mode"] == "equal-cash":
+        return cash / free_slots
+    return min(float(a["position_size"]), cash)
 
 
 def simulate_seed(seed: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -442,6 +566,10 @@ def simulate_seed(seed: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     for idx, day_key in enumerate(prepared["dates"]):
         day_prices = prepared["prices"].get(day_key, {})
         entering, pending = pending, []
+        if a["allocation_mode"] == "equal-cash":
+            free_slots = max(0, a["daily_buy_count"] - len(positions))
+            entering = entering[:free_slots]
+
         for ticker, signal_date, meta in entering:
             px = day_prices.get(ticker)
             if px is None:
@@ -453,7 +581,7 @@ def simulate_seed(seed: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                 continue
             entry = raw_open * (1 + a["slippage_bps"] / 10_000.0)
 
-            target = meta.get("signal_target")
+            target = meta.get("target_price")
             if a["target_mode"] == "fixed-return":
                 target = entry * (1 + a["fixed_take_profit"])
             elif a["target_mode"] == "none":
@@ -464,10 +592,16 @@ def simulate_seed(seed: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
 
             planned_target_pct = None if target is None else (target / entry - 1) * 100.0
             if planned_target_pct is not None:
-                if a["planned_target_return_min"] is not None and planned_target_pct < a["planned_target_return_min"]:
+                if (
+                    a["planned_target_return_min"] is not None
+                    and planned_target_pct < a["planned_target_return_min"]
+                ):
                     skipped_target_return_range += 1
                     continue
-                if a["planned_target_return_max"] is not None and planned_target_pct > a["planned_target_return_max"]:
+                if (
+                    a["planned_target_return_max"] is not None
+                    and planned_target_pct > a["planned_target_return_max"]
+                ):
                     skipped_target_return_range += 1
                     continue
 
@@ -479,7 +613,13 @@ def simulate_seed(seed: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
             elif a["stop_mode"] == "fixed-pct":
                 stop = entry * (1 - a["fixed_stop_loss_pct"])
 
-            qty = int(min(a["position_size"], cash) // (entry * (1 + a["commission_rate"])))
+            current_free_slots = (
+                max(1, a["daily_buy_count"] - len(positions))
+                if a["allocation_mode"] == "equal-cash"
+                else 1
+            )
+            budget = _purchase_budget(a, cash, current_free_slots)
+            qty = int(budget // (entry * (1 + a["commission_rate"])))
             if qty < 1:
                 continue
             gross = qty * entry
@@ -578,7 +718,14 @@ def simulate_seed(seed: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                 active = {pos.ticker for pos in positions}
                 candidates = [ticker for ticker in candidates if ticker not in active]
             rng.shuffle(candidates)
-            for ticker in candidates[: a["daily_buy_count"]]:
+
+            if a["allocation_mode"] == "equal-cash":
+                queue_slots = max(0, a["daily_buy_count"] - len(positions))
+                candidate_limit = min(a["daily_buy_count"], queue_slots)
+            else:
+                candidate_limit = a["daily_buy_count"]
+
+            for ticker in candidates[:candidate_limit]:
                 if idx + 1 < len(prepared["dates"]):
                     meta = prepared["strategy"].get(day_key, {}).get(ticker)
                     if meta is not None:
@@ -620,15 +767,8 @@ def _series_stats(series: pd.Series) -> dict[str, Any]:
     values = pd.to_numeric(series, errors="coerce").dropna()
     if values.empty:
         return {
-            "count": 0,
-            "mean": None,
-            "median": None,
-            "min": None,
-            "p05": None,
-            "p25": None,
-            "p75": None,
-            "p95": None,
-            "max": None,
+            "count": 0, "mean": None, "median": None, "min": None,
+            "p05": None, "p25": None, "p75": None, "p95": None, "max": None,
         }
     return {
         "count": int(len(values)),
@@ -662,13 +802,11 @@ def summarize(
             "actual_holding_days_distribution": _series_stats(trades["actual_holding_days"]),
             "target_hit_average_holding_days": (
                 round(float(target_rows["actual_holding_days"].mean()), 4)
-                if not target_rows.empty
-                else None
+                if not target_rows.empty else None
             ),
             "hold_exit_average_final_return_pct": (
                 round(float(hold_rows["return_pct"].mean()), 4)
-                if not hold_rows.empty
-                else None
+                if not hold_rows.empty else None
             ),
             "return_by_exit_reason_pct": {
                 reason: _series_stats(group["return_pct"])
@@ -682,6 +820,7 @@ def summarize(
         "seed_count": len(results),
         "config": config_dict(a),
         "skipped_no_recent_target_touch": int(prepared.get("skipped_no_touch", 0)),
+        "skipped_no_entry_day_target": int(prepared.get("skipped_no_entry_target", 0)),
         "return_stats_pct": {
             "mean": round(statistics.fmean(returns), 4),
             "median": round(statistics.median(returns), 4),
